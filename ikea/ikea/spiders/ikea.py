@@ -13,10 +13,10 @@ class IkeaSpider(scrapy.Spider):
         o.close()
     domain = 'https://www.ikea.com'
     skip_cat = ['New & Trending', 'Offers']
+    # cities_zip_code = {'New-York': '10001', 'Baltimore': '21201', 'Stockton': '95201', 'Glendale': '85031', 'Amarillo': '79101', 'Salem': '97301', 'Escondido': '92025', 'New Haven': '06501', 'Lafayette': '70501', 'Greeley': '80631', 'Jurupa Valley': '91752'}
     all_cats = []
     cat_api_url = 'https://www.ikea.com/us/en/meta-data/navigation/catalog-products-slim.json'
     pd_api_url = 'https://sik.search.blue.cdtapps.com/us/en/search'
-
 
     def start_requests(self):
         yield scrapy.Request(self.cat_api_url, self.parse_categories, headers=self.headers)
@@ -44,16 +44,23 @@ class IkeaSpider(scrapy.Spider):
                 self.parse,
                 errback=self.errback,
                 data={
-                    "searchParameters": {
-                        "input": cat["id"],
+                    "searchParameters":{
+                        "input":cat['id'],
                         "type":"CATEGORY"
                     },
-                    "zip": "32201",
+                    "zip":"69300","optimizely":{"sik_null_test_20241016_default":"a"},
                     "isUserLoggedIn":False,
-                    "optimizely":{},
                     "components":[
-                        {"component":"PRIMARY_AREA","columns":4,"types":{"main":"PRODUCT","breakouts":["PLANNER","LOGIN_REMINDER","MATTRESS_WARRANTY"]},
-                        "filterConfig":{"max-num-filters":5},"window":{"size":24,"offset":0},"forceFilterCalculation": True}
+                        {
+                            "component":"PRIMARY_AREA",
+                            "columns":4,"types":{"main":"PRODUCT", "breakouts":["PLANNER","LOGIN_REMINDER","MATTRESS_WARRANTY"]},
+                            "filterConfig":{"max-num-filters":5},
+                            "sort":"RELEVANCE",
+                            "window":{
+                                "offset":0,
+                                "size":24
+                            }
+                        }
                     ]
                 },
                 headers=self.headers,
@@ -64,23 +71,53 @@ class IkeaSpider(scrapy.Spider):
         return item['name']
 
     def parse(self, response):
-        response = response.json()
-        breadcrumbs = response['metadata']['categoryPage']['categoryParents'] +\
-            [response['metadata']['categoryPage']['categoryKey']]
+        res_json = response.json()
+        breadcrumbs = res_json['metadata']['categoryPage']['categoryParents'] +\
+            [res_json['metadata']['categoryPage']['categoryKey']]
 
-        for product in response['results'][0]['items']:
+        for product in res_json['results'][0]['items']:
             item = IkeaItem()
 
             if 'planner' in product:
                 continue # I think it is an add
-
-            item['name'] = product['product']['name']
-            item['url'] = product['product']['pipUrl']
 
             for i, breadcrumb in enumerate(breadcrumbs):
                 cat_name = list(filter(lambda c: c['id'] == breadcrumb, self.all_cats))
                 if cat_name:
                     item[f'breadcrumb_{i + 1}'] = cat_name[0]['name']
 
+            from collections import defaultdict
+
+            def safe_json(data=None):
+                if data is None:
+                    data = {}
+                if isinstance(data, dict):
+                    # Recursively apply the function to all dictionary values
+                    return defaultdict(lambda: None, {k: safe_json(v) for k, v in data.items()})
+                else:
+                    return data
+
             item['position'] = int(product['metadata'].split(';')[1])
+            product = safe_json(product['product'])
+            item['id'] = product['id']
+            item['name'] = product['name']
+            item['url'] = product['pipUrl']
+            item['type_name'] = product['typeName']
+            item['online_sellable'] = product['onlineSellable']
+            item['last_chance'] = product['lastChance']
+            item['nb_variants'] = product['gprDescription']['numberOfVariants']
+            item['variants_ids'] = [i['id'] for i in product['gprDescription']['variants'] if 'id' in product['gprDescription']['variants']]
+            item['colors_hex'] = [i['hex'] for i in product['colors'] if 'hex' in product['colors']]
+            item['rating'] = product['ratingValue']
+            item['rating_count'] = product['ratingCount']
+            item['price'] = product['salesPrice']['numeral']
+            item['currency'] = product['salesPrice']['currencyCode']
+            item['discount'] = product['salesPrice']['discount']
+            item['is_breathtaking'] = product['salesPrice']['isBreathTaking']
+            item['image_url'] = product['mainImageUrl']
+            # item['home_delivery'] = product['homeDelivery']
             yield item
+        if res_json['results'][0]['metadata']['end'] < res_json['results'][0]['metadata']['max']:
+            body = json.loads(str(response.request.body, encoding='utf-8'))
+            body['components'][0]['window']['offset'] = res_json['results'][0]['metadata']['end']
+            yield scrapy.http.JsonRequest(response.url, self.parse, data=body, headers=self.headers)
